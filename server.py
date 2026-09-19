@@ -36,6 +36,16 @@ RESTART_S = float(os.environ.get("RESTART_S", "1"))
 
 NS = 1_000_000_000
 
+# Dispatcharr will not release a client until it has buffered roughly 2.3MB.
+# A live feed fills that in about 3.6s, but a standby card is a static image
+# that compresses to ~65KB/s and so takes 35s, which is worse than the problem
+# this came to fix. So prime the buffer with MPEG-TS null packets: PID 0x1FFF
+# is padding, every demuxer discards it, and it costs nothing but loopback
+# bandwidth. Set PRIME_BYTES=0 for a consumer that does not need it.
+PRIME_BYTES = int(os.environ.get("PRIME_BYTES", str(3 * 1024 * 1024)))
+NULL_TS_PACKET = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xFF" * 184
+NULL_TS_BLOCK = NULL_TS_PACKET * 348  # ~64KB, a whole number of TS packets
+
 
 def _encoder():
     """Prefer the iGPU. vah264enc is the modern VA element, vaapih264enc the old
@@ -117,6 +127,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "video/mp2t")
         self.end_headers()
         try:
+            sent = 0
+            while sent < PRIME_BYTES:
+                chunk = NULL_TS_BLOCK[:min(len(NULL_TS_BLOCK), PRIME_BYTES - sent)]
+                self.wfile.write(chunk)
+                sent += len(chunk)
             shutil.copyfileobj(proc.stdout, self.wfile, 65536)
         except (BrokenPipeError, ConnectionResetError):
             pass

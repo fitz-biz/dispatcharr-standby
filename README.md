@@ -98,7 +98,26 @@ arm64 under emulation costs far more than it is worth.
 | `TIMEOUT_S` | `2` | seconds before showing the card |
 | `RESTART_S` | `1` | seconds before retrying a stalled source |
 | `SLATE_TEXT` | `Starting soon` | baked in at build time |
+| `PRIME_BYTES` | `3145728` | null-packet burst to prime a buffering client |
 | `DEBUG` | unset | `1` surfaces pipeline stderr in the log |
+
+### Why the priming burst
+
+Dispatcharr will not release a client until it has buffered roughly 2.3MB. A
+live feed fills that in about 3.6s, but a standby card is a static image that
+compresses to ~65KB/s and takes **35 seconds**, which is worse than the problem
+this exists to solve.
+
+So the response opens with MPEG-TS null packets (PID 0x1FFF), which are padding
+that every demuxer discards. Measured through Dispatcharr:
+
+| Channel | Without priming | With priming |
+|---|---|---|
+| Dead source | 35.2s | **0.59s** |
+| Live source | 3.64s | **0.61s** |
+
+Both still segment cleanly under Plex's copy-mode segmenter with a keyframe in
+segment 0. Set `PRIME_BYTES=0` for a consumer that does not buffer this way.
 
 ## Wiring it to Dispatcharr
 
@@ -107,11 +126,23 @@ argv with no shell, so point it at the sidecar with `curl`, which is already in
 the Dispatcharr image. Nothing about the Dispatcharr image or your channel URLs
 has to change.
 
-- **command:** `/usr/bin/curl`
-- **parameters:** `-s --max-time 86400 http://<sidecar-host>:8099/stream?u={streamUrl}&ua={userAgent}`
+- **command:** `/bin/sh`
+- **parameters:**
+  `-c 'exec /usr/bin/curl -s --max-time 86400 -G --data-urlencode "u=$1" --data-urlencode "ua=$2" http://<sidecar-host>:8099/stream' _ {streamUrl} {userAgent}`
 
-`{streamUrl}` is substituted into its own argument, so a hostile URL cannot
-inject. Rolling back is switching the channels' profile back.
+The values arrive as positional arguments, so a hostile URL cannot inject.
+Rolling back is switching the channels' profile back.
+
+**Use `-G --data-urlencode`, not a hand-built query string.** Dispatcharr's
+`{userAgent}` contains spaces, and pasting it into a URL gets the request
+rejected before it leaves the container:
+
+```
+curl: (3) URL rejected: Malformed input to a URL function
+```
+
+which surfaces as a channel that simply never starts. Letting curl encode the
+query also covers stream URLs that contain `&` or `?`.
 
 ## Why the image is custom
 
