@@ -47,25 +47,49 @@ NULL_TS_PACKET = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xFF" * 184
 NULL_TS_BLOCK = NULL_TS_PACKET * 348  # ~64KB, a whole number of TS packets
 
 
-def _encoder():
+def _encoder_kind():
     """Prefer the iGPU. vah264enc is the modern VA element, vaapih264enc the old
     one; fall back to software so the sidecar still runs on a box without VA."""
-    for element, args in (
-        ("vah264enc", f"vah264enc bitrate={BITRATE} key-int-max={OUT_FPS}"),
-        ("vaapih264enc", f"vaapih264enc bitrate={BITRATE} keyframe-period={OUT_FPS}"),
-    ):
+    for element in ("vah264enc", "vaapih264enc"):
         if subprocess.run(["gst-inspect-1.0", element],
                           stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL).returncode == 0:
-            return args
+            return element
+    return "x264enc"
+
+
+ENCODER_KIND = None  # resolved once at startup
+
+
+def _encoder_args(bitrate):
+    if ENCODER_KIND == "vah264enc":
+        return f"vah264enc bitrate={bitrate} key-int-max={OUT_FPS}"
+    if ENCODER_KIND == "vaapih264enc":
+        return f"vaapih264enc bitrate={bitrate} keyframe-period={OUT_FPS}"
     return (f"x264enc tune=zerolatency speed-preset=veryfast "
-            f"key-int-max={OUT_FPS} bitrate={BITRATE}")
+            f"key-int-max={OUT_FPS} bitrate={bitrate}")
 
 
-ENCODER = None  # resolved once at startup
+def _default_bitrate(height):
+    if height >= 1080:
+        return 8000
+    if height >= 720:
+        return 5000
+    return 2500
 
 
-def build_pipeline(uri):
+def _int_param(qs, key, default, lo, hi):
+    """Clamped, even-valued integer. Callers are trusted (Dispatcharr), but a
+    typo should not hand the encoder an absurd frame size."""
+    try:
+        v = int((qs.get(key) or [None])[0])
+    except (TypeError, ValueError):
+        return default
+    v = max(lo, min(hi, v))
+    return v - (v % 2)  # h264 wants even dimensions
+
+
+def build_pipeline(uri, width, height, bitrate):
     fallback = []
     if os.path.exists(SLATE):
         fallback = [f"fallback-uri=file://{SLATE}"]
@@ -83,8 +107,8 @@ def build_pipeline(uri):
         f"restart-timeout={int(RESTART_S * NS)}",
         "fb.video_0", "!", "queue", "!", "videoconvert", "!", "videoscale", "!",
         "videorate", "!",
-        f"video/x-raw,width={OUT_W},height={OUT_H},framerate={OUT_FPS}/1", "!",
-        *ENCODER.split(), "!",
+        f"video/x-raw,width={width},height={height},framerate={OUT_FPS}/1", "!",
+        *_encoder_args(bitrate).split(), "!",
         "h264parse", "config-interval=1", "!", "mux.",
         "fb.audio_0", "!", "queue", "!", "audioconvert", "!", "audioresample", "!",
         "audio/x-raw,rate=48000,channels=2", "!",
@@ -117,11 +141,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400, "u must be an http(s) URL")
             return
 
+        # Output size is per-request so one sidecar can back several Dispatcharr
+        # profiles (a 1080p one and a 720p one) instead of a container each.
+        width = _int_param(qs, "w", OUT_W, 160, 1920)
+        height = _int_param(qs, "h", OUT_H, 120, 1080)
+        bitrate = _int_param(qs, "b", _default_bitrate(height), 200, 20000)
+
         # Swallowing pipeline stderr makes a broken pipeline look like an empty
         # stream, which is a miserable thing to debug. DEBUG=1 surfaces it.
         stderr = None if os.environ.get("DEBUG") else subprocess.DEVNULL
         proc = subprocess.Popen(
-            build_pipeline(uri), stdout=subprocess.PIPE,
+            build_pipeline(uri, width, height, bitrate), stdout=subprocess.PIPE,
             stderr=stderr, start_new_session=True)
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
@@ -146,8 +176,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ENCODER = _encoder()
-    print(f"encoder: {ENCODER}", flush=True)
+    ENCODER_KIND = _encoder_kind()
+    print(f"encoder: {ENCODER_KIND} (bitrate chosen per request from output height)",
+          flush=True)
     print(f"slate:   {SLATE} ({'present' if os.path.exists(SLATE) else 'absent, using black'})",
           flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

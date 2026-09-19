@@ -9,9 +9,15 @@ Live TV, but it is just an HTTP service that takes an upstream URL and returns
 MPEG-TS, so nothing about it is Dispatcharr-specific.
 
 ```
-GET /stream?u=<upstream url>&ua=<user agent>   ->  MPEG-TS
-GET /healthz                                   ->  ok
+GET /stream?u=<upstream url>&ua=<user agent>[&w=&h=&b=]  ->  MPEG-TS
+GET /healthz                                             ->  ok
 ```
+
+`w`, `h` and `b` (kbps) override the output size and bitrate per request, so one
+sidecar can back several profiles, for example a 1080p one and a 720p one,
+rather than a container each. They are clamped (`w` ≤ 1920, `h` ≤ 1080, `b` ≤
+20000) and rounded to even. Bitrate defaults from the height: 8000 at 1080p,
+5000 at 720p, 2500 below.
 
 ## The problem
 
@@ -129,6 +135,13 @@ has to change.
 - **command:** `/bin/sh`
 - **parameters:**
   `-c 'exec /usr/bin/curl -s --max-time 86400 -G --data-urlencode "u=$1" --data-urlencode "ua=$2" http://<sidecar-host>:8099/stream' _ {streamUrl} {userAgent}`
+
+For a second profile at a different size, add the size to the URL:
+
+  `... http://<sidecar-host>:8099/stream?w=1920&h=1080' _ {streamUrl} {userAgent}`
+
+`-G` appends the encoded `u` and `ua` to an existing query string correctly, so
+the two forms compose.
 
 The values arrive as positional arguments, so a hostile URL cannot inject.
 Rolling back is switching the channels' profile back.
