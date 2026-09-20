@@ -118,10 +118,15 @@ def build_pipeline(uri, width, height, bitrate):
         # negotiated format, and with the format left open it picks one where
         # the fill comes out magenta rather than black. Measured: RGB
         # (255,184,0) unpinned, (0,0,0) pinned.
+        #
+        # The format is deliberately NOT pinned on the output caps. vaapih264enc
+        # wants NV12, so pinning I420 there fails negotiation and the pipeline
+        # silently produces nothing. Leave it open and let the encoder pick.
         "fb.video_0", "!", "queue", "!", "videoconvert", "!",
         "video/x-raw,format=I420", "!",
-        "videoscale", "add-borders=true", "!", "videorate", "!",
-        f"video/x-raw,format=I420,width={width},height={height},"
+        "videoscale", "add-borders=true", "!", "videoconvert", "!",
+        "videorate", "!",
+        f"video/x-raw,width={width},height={height},"
         f"framerate={OUT_FPS}/1,pixel-aspect-ratio=1/1", "!",
         *_encoder_args(bitrate).split(), "!",
         "h264parse", "config-interval=1", "!", "mux.",
