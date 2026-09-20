@@ -105,9 +105,24 @@ def build_pipeline(uri, width, height, bitrate):
         "immediate-fallback=true", "restart-on-eos=true",
         f"timeout={int(TIMEOUT_S * NS)}",
         f"restart-timeout={int(RESTART_S * NS)}",
-        "fb.video_0", "!", "queue", "!", "videoconvert", "!", "videoscale", "!",
-        "videorate", "!",
-        f"video/x-raw,width={width},height={height},framerate={OUT_FPS}/1", "!",
+        # Two things matter here.
+        #
+        # pixel-aspect-ratio=1/1: without it videoscale is free to preserve the
+        # source's display aspect by emitting a non-square PAR instead of adding
+        # borders, which then relies on the player honouring the SAR. That shows
+        # up as intermittent stretching when a source changes shape mid-stream
+        # (ad breaks, SD inserts). Pinned, videoscale must letterbox or
+        # pillarbox instead, which every player renders identically.
+        #
+        # format=I420 before the scale: videoscale fills its borders in the
+        # negotiated format, and with the format left open it picks one where
+        # the fill comes out magenta rather than black. Measured: RGB
+        # (255,184,0) unpinned, (0,0,0) pinned.
+        "fb.video_0", "!", "queue", "!", "videoconvert", "!",
+        "video/x-raw,format=I420", "!",
+        "videoscale", "add-borders=true", "!", "videorate", "!",
+        f"video/x-raw,format=I420,width={width},height={height},"
+        f"framerate={OUT_FPS}/1,pixel-aspect-ratio=1/1", "!",
         *_encoder_args(bitrate).split(), "!",
         "h264parse", "config-interval=1", "!", "mux.",
         "fb.audio_0", "!", "queue", "!", "audioconvert", "!", "audioresample", "!",
